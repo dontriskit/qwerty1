@@ -3,56 +3,83 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-echo "Starting VLLM setup script..."
+echo "Starting VLLM setup and Tailscale script..."
+echo "Running as user: $(whoami)" # Good to check if running as root
 
-# --- Dependency Installation (Only needed if you chose Path B in Step 1) ---
-# echo "Updating apt and installing dependencies..."
-# apt-get update -y
-# apt-get install -y --no-install-recommends gcc curl ca-certificates gnupg lsb-release
-# echo "Installing vLLM..."
-# pip install vllm
-# echo "Installing Tailscale..."
-# curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/$(lsb_release -cs)/installer.sh | bash
-# --- End of Dependency Installation ---
+# --- Dependency Installation ---
+echo "Updating apt cache..."
+apt-get update -y
+
+echo "Installing prerequisites (gcc, curl, tailscale dependencies)..."
+# --no-install-recommends helps keep the install size smaller
+apt-get install -y --no-install-recommends \
+    gcc \
+    curl \
+    ca-certificates \
+    gnupg \
+    lsb-release
+
+echo "Cleaning up apt cache..."
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+
+echo "Installing vLLM python package..."
+# Use --no-cache-dir to avoid filling up space with pip cache
+pip install --no-cache-dir vllm
+
+echo "Installing Tailscale..."
+# Download and execute the official Tailscale installation script
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/$(lsb_release -cs)/installer.sh | bash
+echo "Tailscale installed."
 
 # --- Tailscale Setup ---
-echo "Starting Tailscale daemon..."
-# Start the Tailscale daemon in the background
+echo "Starting Tailscale daemon in background..."
+# Start the daemon. Using userspace-networking often avoids permissions issues in containers.
 tailscaled --tun=userspace-networking --socks5-server=localhost:1055 --outbound-http-proxy-listen=localhost:1055 &
 
-# Check if TAILSCALE_AUTH_KEY is set
+# Give the daemon a moment to initialize
+sleep 3
+
+# Check if the TAILSCALE_AUTH_KEY secret is provided
 if [ -z "$TAILSCALE_AUTH_KEY" ]; then
-  echo "ERROR: TAILSCALE_AUTH_KEY secret is not set!"
-  exit 1
+  echo "ERROR: TAILSCALE_AUTH_KEY secret is not set in Gradient!"
+  echo "Please add the secret to your project."
+  exit 1 # Exit script with an error
 fi
 
-echo "Bringing Tailscale up..."
-# Connect to Tailscale using the auth key stored as a Gradient Secret
-# Using a specific hostname makes it easy to find in the Tailscale console
-tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=gradient-vllm-node --accept-routes --accept-dns=false
+echo "Connecting to Tailscale network..."
+# Connect using the auth key. Use a clear hostname.
+# --accept-dns=false is often safer in managed environments unless you specifically need Tailscale DNS.
+# --force-reauth helps if restarting the container with the same hostname
+tailscale up \
+  --authkey=${TAILSCALE_AUTH_KEY} \
+  --hostname=gradient-vllm-node \
+  --accept-routes \
+  --accept-dns=false \
+  --force-reauth || { echo "Tailscale connection failed!"; exit 1; } # Exit if connection fails
 
-echo "Tailscale connected. IP addresses:"
-tailscale ip -4 # Print the Tailscale IPv4 address
+echo "Tailscale connected successfully. Tailscale IP Address:"
+tailscale ip -4 # Print the Tailscale IP for logs
 
 # --- Start vLLM Server ---
-MODEL_NAME="gaunernst/gemma-3-12b-it-qat-autoawq" # Or make this configurable via secrets/env vars
+MODEL_NAME="gaunernst/gemma-3-12b-it-qat-autoawq" # Or make this dynamic if needed
 echo "Starting vLLM server for model: $MODEL_NAME in the background..."
-# Start vLLM in the background. Output will go to container logs.
-# Using --host 0.0.0.0 ensures it listens on all interfaces within the container (incl. the Tailscale one)
+echo "vLLM output will be minimal here; monitor GPU/process usage."
+
+# Start vLLM in the background. Using 0.0.0.0 makes it listen on all interfaces, including Tailscale's.
+# Redirecting output might be useful for debugging, but for now, let it go to container logs.
 vllm serve $MODEL_NAME --host 0.0.0.0 --port 8000 &
 
-# --- Start Jupyter Lab (as the final foreground process) ---
-echo "Starting Jupyter Lab..."
-# This command assumes the base image doesn't automatically start Jupyter via its CMD/ENTRYPOINT.
-# If the base image *does* start Jupyter, you might only need the Tailscale and vLLM commands above,
-# and then use the *default* Gradient "Command" field which handles Jupyter.
-# Check your base image behavior. If using the default Gradient command, just remove this part.
-# If overriding, use something like this:
-# exec jupyter lab --allow-root --ip=0.0.0.0 --port=8888 --no-browser --ServerApp.token='' --ServerApp.password='' --ServerApp.base_url=${PS_BASE_URI:-/} --ServerApp.trust_xheaders=True --ServerApp.disable_check_xsrf=True
-# The default Gradient command is usually more complex to handle their proxying, so it's often better
-# to let the default command run *after* your background tasks are launched. See Step 4 Option 2.
+# Brief pause to let vllm start or fail quickly
+sleep 5
 
-echo "Startup script finished. Jupyter should be running."
-# Keep the script running if Jupyter isn't the final exec, otherwise background tasks might die.
-# If Jupyter is exec'd above, this isn't needed. If not, uncomment the next line:
-# wait
+# Optional: Check if vLLM process started (simple check)
+if pgrep -f "vllm serve" > /dev/null; then
+    echo "vLLM server process appears to be running."
+else
+    echo "WARNING: vLLM server process might not have started correctly."
+fi
+
+echo "Setup script finished. Background processes launched."
+echo "Proceeding to start Jupyter Lab..."
+# The script ends here. The '&&' in the Gradient command will now execute Jupyter.
