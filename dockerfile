@@ -2,7 +2,6 @@
 FROM rapidsai/notebooks:25.04-cuda12.8-py3.12
 
 # Metadata
-LABEL maintainer="dontriskit <your-email@example.com>" # Optional: Update email
 LABEL description="RAPIDS base with vLLM and Tailscale for Gradient, built via GitHub Actions"
 
 # Switch to root user for installations
