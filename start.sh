@@ -4,37 +4,38 @@
 set -e
 
 echo "Starting VLLM setup and Tailscale script..."
-echo "Running as user: $(whoami)" # Good to check if running as root
+echo "Running as user: $(whoami)" # Should be root
 
-# --- Dependency Installation ---
+# --- Prerequisite Installation ---
 echo "Updating apt cache..."
 apt-get update -y
 
-echo "Installing prerequisites (gcc, curl, tailscale dependencies)..."
-# --no-install-recommends helps keep the install size smaller
+echo "Installing prerequisites (gcc, curl)..."
+# We still need curl to fetch the script, and gcc for vLLM compilation if needed.
 apt-get install -y --no-install-recommends \
     gcc \
     curl \
-    ca-certificates \
-    gnupg \
-    lsb-release
+    ca-certificates
 
 echo "Cleaning up apt cache..."
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
+# --- vLLM Installation ---
 echo "Installing vLLM python package..."
-# Use --no-cache-dir to avoid filling up space with pip cache
-pip install --no-cache-dir vllm
+# Use --root-user-action=ignore to suppress the pip warning
+pip install --no-cache-dir vllm --root-user-action=ignore
+echo ">>> Note: Ignore potential RAPIDS/cuDF/numba dependency warnings above if only using vLLM. <<<"
 
-echo "Installing Tailscale..."
-# Download and execute the official Tailscale installation script
-curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/$(lsb_release -cs)/installer.sh | bash
-echo "Tailscale installed."
+# --- Tailscale Installation (using universal install.sh script) ---
+echo "Installing Tailscale using install.sh..."
+# This script handles adding repo, keys, and installing via apt/dnf/etc.
+curl -fsSL https://tailscale.com/install.sh | sh
+echo "Tailscale installed via install.sh."
 
 # --- Tailscale Setup ---
 echo "Starting Tailscale daemon in background..."
-# Start the daemon. Using userspace-networking often avoids permissions issues in containers.
+# Start the daemon. Running as root, so no sudo needed.
 tailscaled --tun=userspace-networking --socks5-server=localhost:1055 --outbound-http-proxy-listen=localhost:1055 &
 
 # Give the daemon a moment to initialize
@@ -47,10 +48,8 @@ if [ -z "$TAILSCALE_AUTH_KEY" ]; then
   exit 1 # Exit script with an error
 fi
 
-echo "Connecting to Tailscale network..."
+echo "Connecting to Tailscale network (no sudo needed as root)..."
 # Connect using the auth key. Use a clear hostname.
-# --accept-dns=false is often safer in managed environments unless you specifically need Tailscale DNS.
-# --force-reauth helps if restarting the container with the same hostname
 tailscale up \
   --authkey=${TAILSCALE_AUTH_KEY} \
   --hostname=gradient-vllm-node \
@@ -66,8 +65,7 @@ MODEL_NAME="gaunernst/gemma-3-12b-it-qat-autoawq" # Or make this dynamic if need
 echo "Starting vLLM server for model: $MODEL_NAME in the background..."
 echo "vLLM output will be minimal here; monitor GPU/process usage."
 
-# Start vLLM in the background. Using 0.0.0.0 makes it listen on all interfaces, including Tailscale's.
-# Redirecting output might be useful for debugging, but for now, let it go to container logs.
+# Start vLLM in the background. Listens on Tailscale IP due to 0.0.0.0
 vllm serve $MODEL_NAME --host 0.0.0.0 --port 8000 &
 
 # Brief pause to let vllm start or fail quickly
@@ -82,4 +80,4 @@ fi
 
 echo "Setup script finished. Background processes launched."
 echo "Proceeding to start Jupyter Lab..."
-# The script ends here. The '&&' in the Gradient command will now execute Jupyter.
+# Script ends, Gradient command continues with Jupyter Lab
